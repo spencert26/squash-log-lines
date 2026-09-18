@@ -1,0 +1,85 @@
+use std::env;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    let reader = match build_reader(&args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("logsquash: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    if let Err(e) = squash(reader, &mut out) {
+        eprintln!("logsquash: {}", e);
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
+}
+
+// With no args (or a lone "-") we read stdin so this works in a pipeline.
+// Otherwise every argument is treated as a file path and read in order,
+// as if they'd been concatenated first - that keeps squashing correct
+// across a run that spans a file boundary.
+fn build_reader(args: &[String]) -> io::Result<Box<dyn BufRead>> {
+    if args.is_empty() || (args.len() == 1 && args[0] == "-") {
+        return Ok(Box::new(BufReader::new(io::stdin())));
+    }
+
+    let mut combined: Box<dyn Read> = Box::new(io::empty());
+    for path in args {
+        let next: Box<dyn Read> = if path == "-" {
+            Box::new(io::stdin())
+        } else {
+            let file = File::open(path)
+                .map_err(|e| io::Error::new(e.kind(), format!("cannot open '{}': {}", path, e)))?;
+            Box::new(file)
+        };
+        combined = Box::new(combined.chain(next));
+    }
+
+    Ok(Box::new(BufReader::new(combined)))
+}
+
+fn squash(reader: impl BufRead, out: &mut impl Write) -> io::Result<()> {
+    let mut prev: Option<String> = None;
+    let mut count: usize = 0;
+
+    for line in reader.lines() {
+        let line = line?;
+        match &prev {
+            Some(p) if *p == line => count += 1,
+            Some(p) => {
+                flush(out, p, count)?;
+                prev = Some(line);
+                count = 1;
+            }
+            None => {
+                prev = Some(line);
+                count = 1;
+            }
+        }
+    }
+
+    if let Some(p) = prev {
+        flush(out, &p, count)?;
+    }
+
+    Ok(())
+}
+
+fn flush(out: &mut impl Write, line: &str, count: usize) -> io::Result<()> {
+    if count > 1 {
+        writeln!(out, "{}  (x{})", line, count)
+    } else {
+        writeln!(out, "{}", line)
+    }
+}
