@@ -15,17 +15,25 @@ Input line:
 2026-09-19T10:00:04Z ERROR connection reset by peer
 ```
 
+Those first three lines differ only by timestamp, so a plain equality check
+never collapses them. `--skip` tells logsquash how many leading characters to
+ignore when comparing lines, without dropping them from the output:
+
+```
+logsquash --skip 21 app.log
+```
+
 Output:
 
 ```
-2026-09-19T10:00:01Z WARN retry queue full, dropping oldest entry
-2026-09-19T10:00:02Z WARN retry queue full, dropping oldest entry
-2026-09-19T10:00:03Z WARN retry queue full, dropping oldest entry
+2026-09-19T10:00:01Z WARN retry queue full, dropping oldest entry  (x3)
 2026-09-19T10:00:04Z ERROR connection reset by peer
 ```
 
-Note that these four lines each differ by their timestamp, so none of them
-collapse yet - that's the main limitation right now, see below.
+The printed line is always the first one seen in the run, timestamp and all -
+only the comparison ignores the prefix. 21 is the width of
+`2026-09-19T10:00:01Z ` (20-character ISO 8601 timestamp plus the trailing
+space); adjust it to match your own log format.
 
 ## Usage
 
@@ -48,18 +56,16 @@ Read several files as one stream, in order:
 logsquash app.log.1 app.log
 ```
 
-## Current limitation
-
-Lines are compared for exact equality, so a timestamp prefix that changes
-every line defeats the squash. A log line with no timestamp, or one where you
-strip the timestamp before piping it in, squashes as expected:
+Ignore a leading timestamp (or any other fixed-width prefix) when deciding
+whether two lines match:
 
 ```
-cut -d' ' -f2- app.log | logsquash
+logsquash --skip 21 app.log
+tail -f app.log | logsquash -s 21
 ```
 
-Stripping a configurable timestamp prefix automatically is the next piece of
-work - see the roadmap in the repo.
+`--skip` counts characters, not bytes, and `-s` is a shorthand for the same
+flag. `--skip=21` works too.
 
 ## Build
 

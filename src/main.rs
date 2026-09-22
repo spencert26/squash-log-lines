@@ -6,7 +6,15 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
-    let reader = match build_reader(&args) {
+    let config = match parse_args(&args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("logsquash: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let reader = match build_reader(&config.paths) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("logsquash: {}", e);
@@ -17,12 +25,59 @@ fn main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    if let Err(e) = squash(reader, &mut out) {
+    if let Err(e) = squash(reader, config.skip, &mut out) {
         eprintln!("logsquash: {}", e);
         return ExitCode::FAILURE;
     }
 
     ExitCode::SUCCESS
+}
+
+struct Config {
+    skip: usize,
+    paths: Vec<String>,
+}
+
+// --skip/-s takes the number of leading characters to ignore when comparing
+// lines - enough to cover a fixed-width timestamp prefix - without touching
+// what actually gets printed. Everything else is treated as a file path.
+fn parse_args(args: &[String]) -> Result<Config, String> {
+    let mut skip: usize = 0;
+    let mut paths = Vec::new();
+    let mut iter = args.iter();
+
+    while let Some(arg) = iter.next() {
+        if arg == "-" {
+            paths.push(arg.clone());
+            continue;
+        }
+
+        let (flag, inline_value) = match arg.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (arg.as_str(), None),
+        };
+
+        match flag {
+            "--skip" | "-s" => {
+                let value = match inline_value {
+                    Some(v) => v,
+                    None => iter
+                        .next()
+                        .ok_or_else(|| format!("{} requires a value", flag))?
+                        .clone(),
+                };
+                skip = value
+                    .parse()
+                    .map_err(|_| format!("invalid --skip value '{}'", value))?;
+            }
+            _ if arg.starts_with('-') => {
+                return Err(format!("unknown option '{}'", arg));
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+
+    Ok(Config { skip, paths })
 }
 
 // With no args (or a lone "-") we read stdin so this works in a pipeline.
@@ -49,14 +104,14 @@ fn build_reader(args: &[String]) -> io::Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(combined)))
 }
 
-fn squash(reader: impl BufRead, out: &mut impl Write) -> io::Result<()> {
+fn squash(reader: impl BufRead, skip: usize, out: &mut impl Write) -> io::Result<()> {
     let mut prev: Option<String> = None;
     let mut count: usize = 0;
 
     for line in reader.lines() {
         let line = line?;
         match &prev {
-            Some(p) if *p == line => count += 1,
+            Some(p) if compare_key(p, skip) == compare_key(&line, skip) => count += 1,
             Some(p) => {
                 flush(out, p, count)?;
                 prev = Some(line);
@@ -74,6 +129,16 @@ fn squash(reader: impl BufRead, out: &mut impl Write) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+// Skips by character, not byte, so multi-byte UTF-8 in the timestamp itself
+// doesn't land us mid-character. A line shorter than `skip` compares as
+// empty rather than panicking or falling back to the full line.
+fn compare_key(line: &str, skip: usize) -> &str {
+    match line.char_indices().nth(skip) {
+        Some((idx, _)) => &line[idx..],
+        None => "",
+    }
 }
 
 fn flush(out: &mut impl Write, line: &str, count: usize) -> io::Result<()> {
