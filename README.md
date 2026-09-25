@@ -67,6 +67,19 @@ tail -f app.log | logsquash -s 21
 `--skip` counts characters, not bytes, and `-s` is a shorthand for the same
 flag. `--skip=21` works too.
 
+Print just the repeat counts, one per group, with the line text dropped:
+
+```
+logsquash --count-only app.log
+```
+
+```
+3
+1
+```
+
+`-c` is a shorthand for the same flag.
+
 ## Build
 
 Standard library only, nothing to fetch:

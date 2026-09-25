@@ -25,7 +25,7 @@ fn main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    if let Err(e) = squash(reader, config.skip, &mut out) {
+    if let Err(e) = squash(reader, config.skip, config.count_only, &mut out) {
         eprintln!("logsquash: {}", e);
         return ExitCode::FAILURE;
     }
@@ -35,14 +35,18 @@ fn main() -> ExitCode {
 
 struct Config {
     skip: usize,
+    count_only: bool,
     paths: Vec<String>,
 }
 
 // --skip/-s takes the number of leading characters to ignore when comparing
 // lines - enough to cover a fixed-width timestamp prefix - without touching
-// what actually gets printed. Everything else is treated as a file path.
+// what actually gets printed. --count-only/-c drops the line text from the
+// output entirely, leaving just the repeat count per group. Everything else
+// is treated as a file path.
 fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut skip: usize = 0;
+    let mut count_only = false;
     let mut paths = Vec::new();
     let mut iter = args.iter();
 
@@ -70,6 +74,12 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                     .parse()
                     .map_err(|_| format!("invalid --skip value '{}'", value))?;
             }
+            "--count-only" | "-c" => {
+                if inline_value.is_some() {
+                    return Err(format!("{} takes no value", flag));
+                }
+                count_only = true;
+            }
             _ if arg.starts_with('-') => {
                 return Err(format!("unknown option '{}'", arg));
             }
@@ -77,7 +87,11 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
         }
     }
 
-    Ok(Config { skip, paths })
+    Ok(Config {
+        skip,
+        count_only,
+        paths,
+    })
 }
 
 // With no args (or a lone "-") we read stdin so this works in a pipeline.
@@ -104,7 +118,7 @@ fn build_reader(args: &[String]) -> io::Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(combined)))
 }
 
-fn squash(reader: impl BufRead, skip: usize, out: &mut impl Write) -> io::Result<()> {
+fn squash(reader: impl BufRead, skip: usize, count_only: bool, out: &mut impl Write) -> io::Result<()> {
     let mut prev: Option<String> = None;
     let mut count: usize = 0;
 
@@ -113,7 +127,7 @@ fn squash(reader: impl BufRead, skip: usize, out: &mut impl Write) -> io::Result
         match &prev {
             Some(p) if compare_key(p, skip) == compare_key(&line, skip) => count += 1,
             Some(p) => {
-                flush(out, p, count)?;
+                flush(out, p, count, count_only)?;
                 prev = Some(line);
                 count = 1;
             }
@@ -125,7 +139,7 @@ fn squash(reader: impl BufRead, skip: usize, out: &mut impl Write) -> io::Result
     }
 
     if let Some(p) = prev {
-        flush(out, &p, count)?;
+        flush(out, &p, count, count_only)?;
     }
 
     Ok(())
@@ -141,7 +155,10 @@ fn compare_key(line: &str, skip: usize) -> &str {
     }
 }
 
-fn flush(out: &mut impl Write, line: &str, count: usize) -> io::Result<()> {
+fn flush(out: &mut impl Write, line: &str, count: usize, count_only: bool) -> io::Result<()> {
+    if count_only {
+        return writeln!(out, "{}", count);
+    }
     if count > 1 {
         writeln!(out, "{}  (x{})", line, count)
     } else {
